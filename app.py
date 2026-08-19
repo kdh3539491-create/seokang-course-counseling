@@ -36,7 +36,6 @@ except Exception:
 # CSV 불러오기
 # =========================================================
 
-@st.cache_data
 def load_csv(filename):
     path = DATA_DIR / filename
 
