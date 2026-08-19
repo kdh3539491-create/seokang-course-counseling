@@ -1,4 +1,3 @@
-```
 from pathlib import Path
 import csv
 import re
@@ -850,4 +849,3 @@ if user_input:
             "content": answer
         }
     )
-```
