@@ -32,7 +32,6 @@ except Exception:
     )
     st.stop()
 
-
 # =========================================================
 # CSV 불러오기
 # =========================================================
@@ -54,7 +53,6 @@ university_rules = load_csv("university_rules.csv")
 university_scope = load_csv("university_scope.csv")
 source_status_2029 = load_csv("source_status_2029.csv")
 source_audit = load_csv("source_audit.csv")
-
 
 # =========================================================
 # 문자열 처리
@@ -89,8 +87,15 @@ UNIVERSITY_ALIASES = {
 }
 
 
-def canonical_university(name):
-    return UNIVERSITY_ALIASES.get(name, name)
+def university_aliases_for(name):
+    aliases = {name}
+
+    for short, full in UNIVERSITY_ALIASES.items():
+        if name == short or name == full:
+            aliases.add(short)
+            aliases.add(full)
+
+    return aliases
 
 
 # =========================================================
@@ -100,42 +105,87 @@ def canonical_university(name):
 def find_relevant_university_rules(user_text):
     text_norm = normalize(user_text)
 
-    found = []
+    # -----------------------------------------------------
+    # 1. 질문에 등장한 대학 식별
+    # -----------------------------------------------------
+    mentioned_universities = []
 
     for row in university_rules:
-        university = row.get("대학", "")
-        major = row.get("모집단위", "")
-        keywords = row.get("검색키워드", "")
+        university = (row.get("대학") or "").strip()
 
-        aliases = [university]
+        if not university:
+            continue
 
-        for short, full in UNIVERSITY_ALIASES.items():
-            if full == university:
-                aliases.append(short)
+        aliases = university_aliases_for(university)
 
-        university_hit = any(
+        if any(
             normalize(alias) in text_norm
             for alias in aliases
             if alias
-        )
+        ):
+            if university not in mentioned_universities:
+                mentioned_universities.append(university)
 
-        major_terms = [major]
+    # -----------------------------------------------------
+    # 2. 모집단위별 점수 계산
+    # -----------------------------------------------------
+    scored = []
+
+    for row in university_rules:
+        university = (row.get("대학") or "").strip()
+        major = (row.get("모집단위") or "").strip()
+        keywords = row.get("검색키워드") or ""
+
+        # 특정 대학이 확인되면 그 대학 자료만 남긴다.
+        if mentioned_universities:
+            if university not in mentioned_universities:
+                continue
+
+        major_terms = []
+
+        if major:
+            major_terms.append(major)
 
         if keywords:
             major_terms.extend(
-                [x.strip() for x in keywords.split("|") if x.strip()]
+                [
+                    x.strip()
+                    for x in keywords.split("|")
+                    if x.strip()
+                ]
             )
 
-        major_hit = any(
-            normalize(term) in text_norm
-            for term in major_terms
-            if term
-        )
+        score = 0
 
-        if university_hit or major_hit:
-            found.append(row)
+        # 공식 모집단위명이 질문에 그대로 있으면 최우선
+        if major and normalize(major) in text_norm:
+            score += 100
 
-    return found[:15]
+        # 검색 키워드 매칭
+        for term in major_terms:
+            term_norm = normalize(term)
+
+            if not term_norm:
+                continue
+
+            if term_norm in text_norm:
+                # 긴 키워드일수록 신뢰도를 높인다.
+                score += 20 + len(term_norm)
+
+        # 대학명만 확인된 경우에도 최소 후보에는 남긴다.
+        if mentioned_universities and university in mentioned_universities:
+            score += 5
+
+        if score > 0:
+            scored.append((score, row))
+
+    scored.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    # 상위 10개만 모델에 전달
+    return [row for score, row in scored[:10]]
 
 
 # =========================================================
@@ -147,15 +197,18 @@ def find_scope_matches(user_text):
     found = []
 
     for row in university_scope:
-        university = row.get("대학", "")
+        university = (row.get("대학") or "").strip()
 
-        aliases = [university]
+        if not university:
+            continue
 
-        for short, full in UNIVERSITY_ALIASES.items():
-            if full == university:
-                aliases.append(short)
+        aliases = university_aliases_for(university)
 
-        if any(normalize(x) in text_norm for x in aliases if x):
+        if any(
+            normalize(alias) in text_norm
+            for alias in aliases
+            if alias
+        ):
             found.append(row)
 
     return found[:10]
@@ -263,7 +316,6 @@ SYSTEM_INSTRUCTIONS = """
 
 이미 학년을 말했다면 다시 묻지 않는다.
 
-
 [서강고 강제 규칙]
 
 1. 매 학기 정보/제2외국어/한문 교과군에서 정확히 1과목을 선택해야 한다.
@@ -279,7 +331,6 @@ SYSTEM_INSTRUCTIONS = """
 4. 서강고 교육과정에 실제 개설되지 않은 과목을
    학생이 선택할 수 있는 것처럼 말하지 않는다.
 
-
 [서강고 권장사항]
 
 3학년 과목 중
@@ -293,7 +344,6 @@ SYSTEM_INSTRUCTIONS = """
 
 대학의 핵심 전공연계과목이나 학생의 학업계획과 충돌한다면
 장단점을 비교해서 설명한다.
-
 
 [대학 입시자료]
 
@@ -310,20 +360,26 @@ SYSTEM_INSTRUCTIONS = """
 '현재 확보된 공식자료에서는 확인하지 못했습니다.'
 라고 답한다.
 
-
 [2029 상담]
 
 1학년은 2029 대입 대상이다.
 
 2029 대학별 공식 세부자료가 있다면 그것을 최우선 사용한다.
 
-아직 없다면 2028 해당 대학 공식자료를 참고할 수 있으나
-반드시 다음 사실을 명시한다.
+아직 없다면 2028 해당 대학 공식자료를 참고할 수 있으며,
+이 경우 반드시 다음 사실을 명시한다.
 
 '2028 공식자료 참고 / 2029 미확정'
 
-2028 기준이 2029에도 그대로 유지될 것이라고 단정하지 않는다.
+중요:
+현재 DB에서 2028 공식자료가 검색되었다면,
+2029 공식자료가 아직 없다는 이유만으로
+'권장과목 자료가 없다'고 답하지 않는다.
 
+반드시 검색된 2028 공식자료의 권장과목을 학생에게 알려준 뒤
+그 자료가 2029 확정 기준은 아니라는 점을 별도로 설명한다.
+
+2028 기준이 2029에도 그대로 유지될 것이라고 단정하지 않는다.
 
 [2028 상담]
 
@@ -332,7 +388,6 @@ SYSTEM_INSTRUCTIONS = """
 2028 대학 공식 시행계획, 전공연계과목,
 권장이수과목, 핵심권장과목, 반영과목,
 가점·평가기준을 직접 적용한다.
-
 
 [권장과 필수]
 
@@ -352,6 +407,22 @@ SYSTEM_INSTRUCTIONS = """
 권장과목을 이수하지 않았다는 이유만으로
 지원 불가나 불합격을 단정하지 않는다.
 
+[검색된 자료 사용 원칙]
+
+질문과 관련하여 구조화 DB에서 공식자료가 검색되었다면
+그 자료를 답변에서 우선적으로 활용한다.
+
+대학명이나 학과명이 학생 표현과 공식 모집단위 명칭이 조금 다르더라도
+검색 결과가 명확하게 해당 학과를 가리키면 그 자료를 사용한다.
+
+예:
+학생이 '고려대 화학공학과'라고 표현했는데
+검색 결과가 '고려대 화공생명공학과'로 확인되면,
+'고려대의 공식 모집단위명은 화공생명공학과입니다.'라고 짧게 안내하고
+해당 학과의 권장과목 자료를 사용한다.
+
+검색 결과가 여러 개라서 학과를 확정하기 어렵다면
+임의로 하나를 고르지 말고 학생에게 한 번 확인한다.
 
 [상담 방식]
 
@@ -371,7 +442,6 @@ SYSTEM_INSTRUCTIONS = """
 
 학생이 이미 제공한 정보는 다시 묻지 않는다.
 
-
 [여러 대학]
 
 학생이 여러 대학을 희망하면 단순 나열하지 말고
@@ -383,13 +453,11 @@ SYSTEM_INSTRUCTIONS = """
 
 을 종합한다.
 
-
 [전국 대학]
 
 서울권뿐 아니라
 수도권, 국가거점국립대, 지역 국립대,
 지방 사립대, 의약학계열 등 국내 대학 전체를 상담한다.
-
 
 [출처]
 
@@ -404,7 +472,6 @@ SYSTEM_INSTRUCTIONS = """
 
 확인하지 않은 출처를 만들어내지 않는다.
 
-
 [한계]
 
 이 서비스는 학생의 선택과목 결정을 지원하는 상담 도구다.
@@ -415,12 +482,10 @@ SYSTEM_INSTRUCTIONS = """
 
 최종 과목 선택은 담임교사 또는 교육과정 담당교사와 확인하도록 안내한다.
 
-
 [개인정보]
 
 학생의 이름, 학번, 전화번호, 주소 등
 상담에 불필요한 개인정보를 요구하지 않는다.
-
 
 [주제 제한]
 
@@ -435,7 +500,6 @@ SYSTEM_INSTRUCTIONS = """
 라고 짧게 안내하고 본래 상담으로 유도한다.
 """
 
-
 # =========================================================
 # 세션 상태 초기화
 # =========================================================
@@ -448,7 +512,6 @@ if "grade" not in st.session_state:
 
 if "question_count" not in st.session_state:
     st.session_state.question_count = 0
-
 
 # =========================================================
 # 화면 상단
@@ -472,7 +535,6 @@ with st.expander("상담 이용 안내"):
         """
     )
 
-
 # =========================================================
 # 대화 초기 안내
 # =========================================================
@@ -490,7 +552,6 @@ if not st.session_state.messages:
         }
     )
 
-
 # =========================================================
 # 이전 대화 표시
 # =========================================================
@@ -498,7 +559,6 @@ if not st.session_state.messages:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-
 
 # =========================================================
 # 상담 초기화 버튼
@@ -532,7 +592,6 @@ with st.sidebar:
         st.session_state.grade = None
         st.session_state.question_count = 0
         st.rerun()
-
 
 # =========================================================
 # 학생 질문 입력
@@ -637,10 +696,8 @@ if user_input:
     else:
         scope_text = "관련 전국대학 추적자료 없음"
 
-
     # =====================================================
     # 최근 대화만 모델에 전달
-    # 비용 절감을 위해 무제한 전체 대화를 보내지 않음
     # =====================================================
 
     history = st.session_state.messages[-12:]
@@ -655,7 +712,6 @@ if user_input:
             for m in history
         ]
     )
-
 
     # =====================================================
     # 모델에게 전달할 입력
@@ -674,32 +730,26 @@ if user_input:
     else '미확인'
 }
 
-
 [서강고 해당 학생 교육과정]
 
 {curriculum}
-
 
 [질문과 관련하여 현재 구조화 DB에서 검색된 대학 공식자료]
 
 {university_evidence}
 
-
 [전국 대학 추적 DB]
 
 {scope_text}
-
 
 [최근 상담 대화]
 
 {history_text}
 
-
 [이번 학생 질문]
 
 {user_input}
 """
-
 
     # =====================================================
     # OpenAI 호출
